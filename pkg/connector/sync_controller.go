@@ -326,7 +326,7 @@ func (c *IMClient) seedDeletedChatsFromRecycleBin(log zerolog.Logger) {
 			// the tombstone entirely. This fixes fresh-backfill for chats that were
 			// deleted before the bridge's first ever sync (they appear in the recycle
 			// bin zone but their messages are still in the main zone).
-			if hasMessages, msgErr := c.cloudStore.hasPortalMessages(ctx, portalID); msgErr == nil && hasMessages {
+			if hasMessages, msgErr := c.hasPortalMessagesWithFallback(ctx, portalID); msgErr == nil && hasMessages {
 				dn := ""
 				if chat.DisplayName != nil {
 					dn = *chat.DisplayName
@@ -3628,6 +3628,40 @@ func (c *IMClient) hasMessageUUIDWithFallback(ctx context.Context, uuid string) 
 		return false, nil
 	}
 	return c.cloudStore.hasMessageUUID(ctx, uuid)
+}
+
+// hasPortalMessagesWithFallback checks bridge_message_meta first, falls
+// back to cloud_message. Boolean OR — true if either table has a row.
+func (c *IMClient) hasPortalMessagesWithFallback(ctx context.Context, portalID string) (bool, error) {
+	if c.bridgeMeta != nil {
+		if has, err := c.bridgeMeta.hasPortalMessages(ctx, portalID); err == nil && has {
+			return true, nil
+		}
+	}
+	if c.cloudStore == nil {
+		return false, nil
+	}
+	return c.cloudStore.hasPortalMessages(ctx, portalID)
+}
+
+// getNewestBackfillableMessageTimestampWithFallback returns max(timestamp_ms)
+// across both tables. The requireContentful flag is dropped: bridge_message_meta
+// can't reproduce 'has text or attachments' (no content columns); cloud_message
+// can still honour it for legacy rows. We pass requireContentful=true to
+// cloud_message so its result keeps the legacy filter for unmigrated data.
+func (c *IMClient) getNewestBackfillableMessageTimestampWithFallback(ctx context.Context, portalID string) (int64, error) {
+	var best int64
+	if c.bridgeMeta != nil {
+		if ts, err := c.bridgeMeta.getNewestBackfillableMessageTimestamp(ctx, portalID); err == nil && ts > best {
+			best = ts
+		}
+	}
+	if c.cloudStore != nil {
+		if ts, err := c.cloudStore.getNewestBackfillableMessageTimestamp(ctx, portalID, true); err == nil && ts > best {
+			best = ts
+		}
+	}
+	return best, nil
 }
 
 // isCloudBackfilledMessageWithFallback mirrors hasMessageUUIDWithFallback —

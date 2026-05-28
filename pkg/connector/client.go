@@ -4064,7 +4064,7 @@ func (c *IMClient) runRestoreBackfillPipeline(opts restorePipelineOptions) {
 		log.Info().Int("undeleted", undeleted).Msg("Undeleted cloud_message rows for restore")
 	}
 	needsRecoverMessages := false
-	if hasMessages, err := c.cloudStore.hasPortalMessages(ctx, portalID); err != nil {
+	if hasMessages, err := c.hasPortalMessagesWithFallback(ctx, portalID); err != nil {
 		log.Warn().Err(err).Msg("Failed to check portal messages during restore")
 	} else if !hasMessages {
 		needsRecoverMessages = true
@@ -4940,7 +4940,7 @@ func (c *IMClient) queueRecoveredPortalResync(log zerolog.Logger, portalKey netw
 	// still backfill zero messages.
 	var latestMessageTS time.Time
 	if c.cloudStore != nil {
-		if newestTS, err := c.cloudStore.getNewestBackfillableMessageTimestamp(context.Background(), portalID, true); err == nil && newestTS > 0 {
+		if newestTS, err := c.getNewestBackfillableMessageTimestampWithFallback(context.Background(), portalID); err == nil && newestTS > 0 {
 			latestMessageTS = time.UnixMilli(newestTS)
 		}
 	}
@@ -6271,7 +6271,7 @@ func (c *IMClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 	if c.Main.Config.UseChatDBBackfill() {
 		canBackfill = c.chatDB != nil
 	} else if c.cloudStore != nil {
-		if hasMessages, err := c.cloudStore.hasPortalMessages(ctx, portalID); err == nil {
+		if hasMessages, err := c.hasPortalMessagesWithFallback(ctx, portalID); err == nil {
 			canBackfill = hasMessages
 		}
 		// Force backfill for portals with a restore override (from
@@ -7041,7 +7041,7 @@ func (c *IMClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessa
 		// nothing for forward backfill to anchor against, and deferring
 		// creates an infinite retry loop.
 		if !c.cloudStore.isForwardBackfillDone(ctx, portalID) {
-			hasMessages, _ := c.cloudStore.hasPortalMessages(ctx, portalID)
+			hasMessages, _ := c.hasPortalMessagesWithFallback(ctx, portalID)
 			if hasMessages {
 				log.Info().Str("portal_id", portalID).
 					Msg("Backward backfill: no anchor yet, forward backfill still in progress — deferring")
@@ -7067,7 +7067,7 @@ func (c *IMClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessa
 		// was deleted and recovered). Fetch the latest messages forward-style
 		// so the portal gets populated.
 		if c.cloudStore != nil {
-			if hasMessages, _ := c.cloudStore.hasPortalMessages(ctx, portalID); hasMessages {
+			if hasMessages, _ := c.hasPortalMessagesWithFallback(ctx, portalID); hasMessages {
 				log.Info().Str("portal_id", portalID).
 					Msg("Backward backfill: no anchor but portal has messages — doing recovery backfill")
 				rows, queryErr := c.cloudStore.listLatestMessages(ctx, portalID, count)

@@ -462,6 +462,43 @@ func (s *bridgeMetaStore) hasMessageUUID(ctx context.Context, uuid string) (bool
 	return count > 0, err
 }
 
+// hasPortalMessages reports whether the portal has at least one non-deleted
+// CloudKit-imported message (record_name <> ''). Filters out the APNs stub
+// rows (record_name='') the same way the cloud_backfill_store helper did.
+func (s *bridgeMetaStore) hasPortalMessages(ctx context.Context, portalID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM bridge_message_meta
+		WHERE login_id=$1 AND portal_id=$2 AND deleted=FALSE AND record_name <> ''
+	`, s.loginID, portalID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// getNewestBackfillableMessageTimestamp returns the highest timestamp_ms
+// among the portal's non-deleted CloudKit-imported messages.
+//
+// Note vs. cloud_backfill_store: that one supported a requireContentful
+// flag that filtered text<>'' OR attachments_json<>''. We can't replicate
+// that in bridge_message_meta because text/subject are intentionally
+// absent. record_name<>'' is the closest proxy: APNs stubs (which have no
+// content) have record_name=''; CloudKit-imported rows always carry it.
+func (s *bridgeMetaStore) getNewestBackfillableMessageTimestamp(ctx context.Context, portalID string) (int64, error) {
+	var ts sql.NullInt64
+	err := s.db.QueryRow(ctx, `
+		SELECT MAX(timestamp_ms)
+		FROM bridge_message_meta
+		WHERE login_id=$1 AND portal_id=$2 AND deleted=FALSE AND record_name <> ''
+	`, s.loginID, portalID).Scan(&ts)
+	if err != nil || !ts.Valid {
+		return 0, err
+	}
+	return ts.Int64, nil
+}
+
 // isCloudBackfilledMessage reports whether a GUID was imported as a CloudKit
 // backfill (record_name populated) vs an APNs-only real-time stub
 // (record_name empty). Mirrors cloud_backfill_store.isCloudBackfilledMessage —
