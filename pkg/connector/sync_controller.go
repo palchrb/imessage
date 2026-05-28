@@ -3117,6 +3117,21 @@ func (c *IMClient) ingestCloudMessages(
 		// concurrent or future re-syncs don't resurrect the portal.
 		isDeleted := deletedPortalsSnapshot[portalID]
 
+		// Privacy fork: cloud_message rows go to disk with topology only.
+		// Text, subject, and the rich attachment JSON stay in the session
+		// (populated below) for the Phase 3 flush; they never reach disk.
+		// On UPSERT conflict the legacy ON CONFLICT clause will blank
+		// previously-stored text from re-ingested rows, so a few sync
+		// cycles after the fork goes live the legacy text is gone even
+		// without running `migrate --drop-legacy`.
+		//
+		// Crash window: if the bridge dies after ingestCloudMessages
+		// returns (token committed) but before flushCloudSessionToMatrix
+		// runs, the session is lost and those messages are stuck in
+		// cloud_message as topology-only rows that will never reach
+		// Matrix. The brief documents this as "RAM-tap akseptert" —
+		// re-pull on restart is bounded by the saved sync token and we
+		// accept the loss for the page that was in flight at crash.
 		batch = append(batch, cloudMessageRow{
 			GUID:              msg.Guid,
 			RecordName:        msg.RecordName,
@@ -3125,14 +3140,14 @@ func (c *IMClient) ingestCloudMessages(
 			TimestampMS:       timestampMS,
 			Sender:            msg.Sender,
 			IsFromMe:          msg.IsFromMe,
-			Text:              text,
-			Subject:           subject,
+			Text:              "",
+			Subject:           "",
 			Service:           msg.Service,
 			Deleted:           isDeleted,
 			TapbackType:       msg.TapbackType,
 			TapbackTargetGUID: tapbackTargetGUID,
 			TapbackEmoji:      tapbackEmoji,
-			AttachmentsJSON:   attachmentsJSON,
+			AttachmentsJSON:   "",
 			DateReadMS:        msg.DateReadMs,
 			HasBody:           msg.HasBody,
 		})

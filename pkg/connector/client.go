@@ -4872,6 +4872,15 @@ func (c *IMClient) fetchRecoveredMessagesFromCloudKit(ctx context.Context, log z
 		if msg.TapbackEmoji != nil {
 			tapbackEmoji = *msg.TapbackEmoji
 		}
+		// TODO(privacy-fork): this recovery path still writes text to
+		// cloud_message. The restore-chat command queues a ChatResync
+		// without BundledBackfillData (see commands.go), which then
+		// falls back to FetchMessages reading from cloud_message. If we
+		// blanked text here the restored messages would render empty.
+		// Restore-chat needs to be rewritten to populate the RAM session
+		// and queue with a bundle — tracked for a follow-up commit. The
+		// main CloudKit sync path (ingestCloudMessages) already runs
+		// topology-only.
 		rows = append(rows, cloudMessageRow{
 			GUID:              msg.Guid,
 			RecordName:        msg.RecordName,
