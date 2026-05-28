@@ -462,6 +462,30 @@ func (s *bridgeMetaStore) hasMessageUUID(ctx context.Context, uuid string) (bool
 	return count > 0, err
 }
 
+// listMessageRecordNamesByPortal returns all non-empty record_names attached
+// to bridge_message_meta rows for the given portal. Mirrors
+// cloud_backfill_store.getMessageRecordNamesByPortalID.
+func (s *bridgeMetaStore) listMessageRecordNamesByPortal(ctx context.Context, portalID string) ([]string, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT record_name FROM bridge_message_meta
+		 WHERE login_id=$1 AND portal_id=$2 AND record_name <> ''`,
+		s.loginID, portalID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
 // hasPortalMessages reports whether the portal has at least one non-deleted
 // CloudKit-imported message (record_name <> ''). Filters out the APNs stub
 // rows (record_name='') the same way the cloud_backfill_store helper did.

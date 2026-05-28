@@ -5864,7 +5864,7 @@ func (c *IMClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.
 				Str("sibling_uuid", siblingUUID).
 				Msg("Failed to unsend sibling iMessage on split image+caption redact")
 		} else if c.cloudStore != nil {
-			c.cloudStore.softDeleteMessageByGUID(ctx, siblingUUID)
+			c.softDeleteMessageBothStores(ctx, siblingUUID)
 		}
 	}
 
@@ -5876,7 +5876,7 @@ func (c *IMClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.
 	// Soft-delete the message in local DB so it doesn't re-bridge on backfill,
 	// while preserving the UUID for echo detection.
 	if c.cloudStore != nil {
-		c.cloudStore.softDeleteMessageByGUID(ctx, string(msg.TargetMessage.ID))
+		c.softDeleteMessageBothStores(ctx, string(msg.TargetMessage.ID))
 	}
 
 	return err
@@ -6017,7 +6017,7 @@ func (c *IMClient) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev2.Mat
 			log.Warn().Err(err).Str("portal_id", portalID).Msg("Failed to clear restore override for locally deleted chat")
 		}
 		chatRecordNames, _ = c.cloudStore.getCloudRecordNamesByPortalID(ctx, portalID)
-		msgRecordNames, _ = c.cloudStore.getMessageRecordNamesByPortalID(ctx, portalID)
+		msgRecordNames, _ = c.listMessageRecordNamesByPortalWithFallback(ctx, portalID)
 
 		// Fallback: if no record_names by portal_id, look up by group_id.
 		groupID := ""

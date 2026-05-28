@@ -3664,6 +3664,47 @@ func (c *IMClient) getNewestBackfillableMessageTimestampWithFallback(ctx context
 	return best, nil
 }
 
+// softDeleteMessageBothStores marks a GUID as deleted=TRUE in both
+// cloud_message and bridge_message_meta so downstream dedup and restore
+// behaviour stays consistent across the transition. Errors are intentionally
+// swallowed (mirrors the cloud_backfill_store helper's existing semantics).
+func (c *IMClient) softDeleteMessageBothStores(ctx context.Context, guid string) {
+	if c.cloudStore != nil {
+		c.cloudStore.softDeleteMessageByGUID(ctx, guid)
+	}
+	if c.bridgeMeta != nil {
+		_ = c.bridgeMeta.markMessageDeleted(ctx, guid)
+	}
+}
+
+// listMessageRecordNamesByPortalWithFallback returns the union of record_names
+// across both tables for the given portal. Used by recovery/pre-upload code
+// that wants every record_name observed for the portal.
+func (c *IMClient) listMessageRecordNamesByPortalWithFallback(ctx context.Context, portalID string) ([]string, error) {
+	seen := make(map[string]struct{})
+	if c.bridgeMeta != nil {
+		if names, err := c.bridgeMeta.listMessageRecordNamesByPortal(ctx, portalID); err == nil {
+			for _, n := range names {
+				seen[n] = struct{}{}
+			}
+		}
+	}
+	if c.cloudStore != nil {
+		if names, err := c.cloudStore.getMessageRecordNamesByPortalID(ctx, portalID); err == nil {
+			for _, n := range names {
+				seen[n] = struct{}{}
+			}
+		} else if c.bridgeMeta == nil {
+			return nil, err
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	return out, nil
+}
+
 // isCloudBackfilledMessageWithFallback mirrors hasMessageUUIDWithFallback —
 // checks bridge_message_meta first, falls back to cloud_message on miss.
 // Used to suppress ghost read-receipts for messages that came in via the
