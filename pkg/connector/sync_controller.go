@@ -2029,6 +2029,12 @@ func (c *IMClient) runCloudKitBackfill(ctx context.Context, log zerolog.Logger) 
 		Dur("total_elapsed", time.Since(backfillStart)).
 		Msg("CloudKit phase 2 (messages) complete")
 
+	// Phase 3 (privacy-fork flush): hand the accumulated session over to
+	// bridgev2 as bundled-backfill events, then drop the session. The
+	// session is RAM-only and short-lived by design — the brief's "Drop
+	// RAM" step in Phase 3 happens here.
+	c.flushCloudSessionToMatrix(ctx, log)
+
 	return total, nil
 }
 
@@ -3175,6 +3181,7 @@ func (c *IMClient) ingestCloudMessages(
 				TapbackTargetGUID: tapbackTargetGUID,
 				TapbackEmoji:      tapbackEmoji,
 				AttachmentGUIDs:   msg.AttachmentGuids,
+				AttachmentsJSON:   attachmentsJSON,
 				DateReadMS:        msg.DateReadMs,
 			})
 		}
@@ -3573,6 +3580,99 @@ func (c *IMClient) persistRealtimeTapbackUUID(ctx context.Context, uuid, portalI
 		}
 	}
 	return nil
+}
+
+// flushCloudSessionToMatrix is Phase 3 of the privacy-fork sync model.
+//
+// For every portal accumulated in the RAM session this run, build a
+// chronological list of BackfillMessage events and hand them to bridgev2 as
+// the BundledBackfillData on a ChatResync event. bridgev2 calls
+// FetchMessages with that bundle (params.BundledData); our FetchMessages
+// returns it directly without consulting cloud_message. After the events
+// are queued the bundle reference lives on bridgev2's event queue, so we
+// drop the session here — text never reaches disk via the session, and the
+// RAM is released as soon as bridgev2 processes the event.
+//
+// Conversion goes through cloudRowsToBackfillMessages so the existing
+// reply/tapback resolution, attachment-rendering and system-message
+// filtering all keep working without duplication.
+func (c *IMClient) flushCloudSessionToMatrix(ctx context.Context, log zerolog.Logger) {
+	c.cloudSessionLock.Lock()
+	session := c.cloudSession
+	c.cloudSession = nil
+	c.cloudSessionLock.Unlock()
+
+	if session == nil {
+		return
+	}
+	portalIDs := session.PortalIDs()
+	if len(portalIDs) == 0 {
+		log.Info().Msg("Privacy flush: session empty, nothing to push")
+		return
+	}
+	flushStart := time.Now()
+	queued := 0
+	var totalMessages int
+
+	for _, portalID := range portalIDs {
+		msgs := session.GetSortedMessages(portalID)
+		if len(msgs) == 0 {
+			continue
+		}
+		rows := make([]cloudMessageRow, len(msgs))
+		for i, m := range msgs {
+			rows[i] = m.toCloudMessageRow()
+		}
+
+		var groupDisplayName string
+		if c.cloudStore != nil {
+			groupDisplayName, _ = c.cloudStore.getDisplayNameByPortalID(ctx, portalID)
+		}
+
+		// Pre-upload attachments so cloudRowsToBackfillMessages's downstream
+		// cloudAttachmentsToBackfill finds them in the in-memory cache rather
+		// than triggering live CloudKit downloads during conversion.
+		c.preUploadChunkAttachments(ctx, rows, log)
+
+		backfillMsgs := c.cloudRowsToBackfillMessages(ctx, rows, groupDisplayName)
+		if len(backfillMsgs) == 0 {
+			continue
+		}
+
+		// Use the newest message timestamp as the LatestMessageTS so
+		// bridgev2's default CheckNeedsBackfill can decide whether to
+		// proceed. Skipping CheckNeedsBackfillFunc keeps the gate
+		// behaviour in line with the framework default.
+		newest := backfillMsgs[len(backfillMsgs)-1].Timestamp
+
+		response := &bridgev2.FetchMessagesResponse{
+			Messages: backfillMsgs,
+			HasMore:  false,
+			Forward:  true,
+		}
+		portalKey := networkid.PortalKey{ID: networkid.PortalID(portalID), Receiver: c.UserLogin.ID}
+		evt := &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:         bridgev2.RemoteEventChatResync,
+				PortalKey:    portalKey,
+				CreatePortal: true,
+				Timestamp:    time.Now(),
+			},
+			LatestMessageTS:     newest,
+			BundledBackfillData: response,
+			GetChatInfoFunc:     c.GetChatInfo,
+		}
+		c.Main.Bridge.QueueRemoteEvent(c.UserLogin, evt)
+		session.MarkPortalFlushed(portalID)
+		queued++
+		totalMessages += len(backfillMsgs)
+	}
+
+	log.Info().
+		Dur("phase3_elapsed", time.Since(flushStart)).
+		Int("portals_queued", queued).
+		Int("messages_queued", totalMessages).
+		Msg("Privacy flush: bundled-backfill events queued, session dropped")
 }
 
 // persistBridgeAttachmentMeta extracts identifier-only metadata from a Matrix

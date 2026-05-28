@@ -6716,6 +6716,20 @@ func (c *IMClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessa
 		}()
 	}
 
+	// Privacy-fork push path: when the CloudKit sync's flush phase queued a
+	// ChatResync with BundledBackfillData, bridgev2 hands us the data back
+	// via params.BundledData. Return it directly — text comes from RAM, not
+	// cloud_message. Falling through to the legacy path would just re-read
+	// the same messages from cloud_message and could double-deliver.
+	if bundled, ok := params.BundledData.(*bridgev2.FetchMessagesResponse); ok && bundled != nil {
+		forwardDone = true
+		log.Info().
+			Bool("forward", params.Forward).
+			Int("messages", len(bundled.Messages)).
+			Msg("FetchMessages: returning bundled backfill from RAM session")
+		return bundled, nil
+	}
+
 	// When the user has capped max_initial_messages, skip backward backfill
 	// entirely. Forward backfill already delivered the capped N messages;
 	// returning empty here marks the backward task as done immediately.
