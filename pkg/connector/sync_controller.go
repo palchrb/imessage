@@ -3533,6 +3533,41 @@ func (c *IMClient) persistRealtimeTapbackUUID(ctx context.Context, uuid, portalI
 	return nil
 }
 
+// persistBridgeAttachmentMeta extracts identifier-only metadata from a Matrix
+// MessageEventContent that the bridge just successfully uploaded, and persists
+// it to bridge_attachment_meta. Best-effort — failures are logged but never
+// propagated, mirroring the cloud_attachment_cache write that runs alongside.
+//
+// The mxc:// URI is read from content.URL (unencrypted media) or
+// content.File.URL (encrypted media); whichever the upload populated.
+func (c *IMClient) persistBridgeAttachmentMeta(ctx context.Context, attachmentGUID, messageGUID string, content *event.MessageEventContent) {
+	if c.bridgeMeta == nil || content == nil || attachmentGUID == "" {
+		return
+	}
+	mxc := string(content.URL)
+	if mxc == "" && content.File != nil {
+		mxc = string(content.File.URL)
+	}
+	row := bridgeAttachmentMetaRow{
+		GUID:        attachmentGUID,
+		MessageGUID: messageGUID,
+		MXCURI:      mxc,
+	}
+	if content.Info != nil {
+		row.MIME = content.Info.MimeType
+		row.SizeBytes = int64(content.Info.Size)
+		row.Width = content.Info.Width
+		row.Height = content.Info.Height
+		row.DurationMS = content.Info.Duration
+	}
+	if err := c.bridgeMeta.upsertAttachment(ctx, row); err != nil {
+		c.Main.Bridge.Log.Warn().Err(err).
+			Str("attachment_guid", attachmentGUID).
+			Str("message_guid", messageGUID).
+			Msg("bridge_attachment_meta upsert failed (continuing)")
+	}
+}
+
 func (c *IMClient) ensureCloudSyncStore(ctx context.Context) error {
 	if c.cloudStore == nil {
 		return fmt.Errorf("cloud store not initialized")

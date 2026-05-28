@@ -7795,6 +7795,13 @@ func (c *IMClient) downloadAndUploadAttachment(
 			c.cloudStore.saveAttachmentCacheEntry(ctx, att.RecordName, jsonBytes)
 		}
 	}
+	// Privacy-fork: dual-write the attachment metadata (identifier-only) to
+	// bridge_attachment_meta. cloud_attachment_cache stores the full
+	// MessageEventContent JSON (filename, captions, encryption-keys); we keep
+	// only the GUID, mxc:// pointer, MIME and dimensions.
+	if c.bridgeMeta != nil {
+		c.persistBridgeAttachmentMeta(ctx, att.GUID, row.GUID, content)
+	}
 
 	parts := make([]*bridgev2.ConvertedMessagePart, 0, 2)
 	if isVCardAttachment(mimeType, fileName, att.UTIType) {
