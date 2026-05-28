@@ -3464,7 +3464,15 @@ func (c *IMClient) ensureCloudSyncStore(ctx context.Context) error {
 	if c.cloudStore == nil {
 		return fmt.Errorf("cloud store not initialized")
 	}
-	return c.cloudStore.ensureSchema(ctx)
+	if err := c.cloudStore.ensureSchema(ctx); err != nil {
+		return err
+	}
+	if c.bridgeMeta != nil {
+		if err := c.bridgeMeta.ensureSchema(ctx); err != nil {
+			return fmt.Errorf("bridge meta schema: %w", err)
+		}
+	}
+	return nil
 }
 
 // filenameBase returns the filename without its extension.

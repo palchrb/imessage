@@ -255,6 +255,10 @@ type IMClient struct {
 	// Cloud backfill local cache store.
 	cloudStore *cloudBackfillStore
 
+	// Identifier-only persistence layer for the privacy fork. Runs alongside
+	// cloudStore during the transition; eventually replaces it.
+	bridgeMeta *bridgeMetaStore
+
 	// Layer-2 MMCS attachment recovery: persists descriptors for attachments
 	// whose push-time download exhausted the rustpushgo retry (Layer 1).
 	// AttachmentRetrier drains this on a timer with its own longer-horizon
