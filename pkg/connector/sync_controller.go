@@ -1912,6 +1912,20 @@ func (c *IMClient) runCloudKitBackfill(ctx context.Context, log zerolog.Logger) 
 	var total cloudSyncCounters
 	backfillStart := time.Now()
 
+	// Privacy-fork: spin up a fresh RAM-staging session for this sync run.
+	// ingestCloudMessages populates it alongside cloud_message; readers
+	// (FetchMessages) wire up in a follow-up commit. The session is dropped
+	// at function exit for now — once readers go live, the drop moves to
+	// AllFlushed() after the flush phase.
+	c.cloudSessionLock.Lock()
+	c.cloudSession = newCloudSyncSession()
+	c.cloudSessionLock.Unlock()
+	defer func() {
+		c.cloudSessionLock.Lock()
+		c.cloudSession = nil
+		c.cloudSessionLock.Unlock()
+	}()
+
 	// Always restart attachment sync from scratch. The attachment map
 	// (attMap) is built in-memory during sync and used to enrich messages.
 	// On crash/restart the map is lost, so resuming from a saved token
@@ -3136,6 +3150,34 @@ func (c *IMClient) ingestCloudMessages(
 			TapbackType:       msg.TapbackType,
 			AttachmentGUIDs:   msg.AttachmentGuids,
 		})
+
+		// Privacy-fork RAM staging: accumulate text + topology in-memory for
+		// this sync's flush phase. The session is read by FetchMessages (in
+		// a follow-up commit) and dropped after the sync completes — text
+		// never reaches disk via this path.
+		c.cloudSessionLock.RLock()
+		session := c.cloudSession
+		c.cloudSessionLock.RUnlock()
+		if session != nil && !isDeleted {
+			session.Append(portalID, sessionMessage{
+				GUID:              msg.Guid,
+				RecordName:        msg.RecordName,
+				PortalID:          portalID,
+				ChatID:            msg.CloudChatId,
+				TimestampMS:       timestampMS,
+				Sender:            msg.Sender,
+				IsFromMe:          msg.IsFromMe,
+				Service:           msg.Service,
+				Text:              text,
+				Subject:           subject,
+				HasBody:           msg.HasBody,
+				TapbackType:       msg.TapbackType,
+				TapbackTargetGUID: tapbackTargetGUID,
+				TapbackEmoji:      tapbackEmoji,
+				AttachmentGUIDs:   msg.AttachmentGuids,
+				DateReadMS:        msg.DateReadMs,
+			})
+		}
 
 		if existingSet[msg.Guid] {
 			counts.Updated++

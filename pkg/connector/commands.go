@@ -73,6 +73,7 @@ func BridgeCommands(disableFaceTime bool) []*commands.FullHandler {
 		cmdRestoreDebug,
 		cmdMsgDebug,
 		cmdContacts,
+		cmdPrivacySessionStats,
 	}
 	if !disableFaceTime {
 		cmds = append(cmds,

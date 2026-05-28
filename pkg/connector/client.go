@@ -259,6 +259,12 @@ type IMClient struct {
 	// cloudStore during the transition; eventually replaces it.
 	bridgeMeta *bridgeMetaStore
 
+	// RAM-staging layer for the privacy fork. Populated during CloudKit
+	// sync with text+topology; readers wire up in a follow-up commit. Nil
+	// outside of an active sync run.
+	cloudSession     *cloudSyncSession
+	cloudSessionLock sync.RWMutex
+
 	// Layer-2 MMCS attachment recovery: persists descriptors for attachments
 	// whose push-time download exhausted the rustpushgo retry (Layer 1).
 	// AttachmentRetrier drains this on a timer with its own longer-horizon
