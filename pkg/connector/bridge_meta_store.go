@@ -390,6 +390,32 @@ func (s *bridgeMetaStore) markMessageDeletedBatch(ctx context.Context, guids []s
 	return nil
 }
 
+// persistMessageUUID is the real-time APNs counterpart to upsertMessageBatch:
+// stores GUID + topology so a future CloudKit replay (or a restart) dedups
+// against an already-seen UUID. Uses INSERT OR IGNORE to be safe on repeat.
+func (s *bridgeMetaStore) persistMessageUUID(ctx context.Context, uuid, portalID string, timestampMS int64, isFromMe bool) error {
+	nowMS := time.Now().UnixMilli()
+	_, err := s.db.Exec(ctx, `
+		INSERT OR IGNORE INTO bridge_message_meta (
+			login_id, guid, portal_id, timestamp_ms, is_from_me, deleted, retry_count, created_ts, updated_ts
+		) VALUES ($1, $2, $3, $4, $5, FALSE, 0, $6, $7)
+	`, s.loginID, uuid, nullableString(stringPtrOrNil(portalID)), timestampMS, isFromMe, nowMS, nowMS)
+	return err
+}
+
+// persistTapbackUUID is persistMessageUUID + tapback_type, mirroring
+// cloud_backfill_store.persistTapbackUUID's semantics so dedup-aware queries
+// can distinguish a synthetic tapback row from a substantive message.
+func (s *bridgeMetaStore) persistTapbackUUID(ctx context.Context, uuid, portalID string, timestampMS int64, isFromMe bool, tapbackType uint32) error {
+	nowMS := time.Now().UnixMilli()
+	_, err := s.db.Exec(ctx, `
+		INSERT OR IGNORE INTO bridge_message_meta (
+			login_id, guid, portal_id, timestamp_ms, is_from_me, deleted, tapback_type, retry_count, created_ts, updated_ts
+		) VALUES ($1, $2, $3, $4, $5, FALSE, $6, 0, $7, $8)
+	`, s.loginID, uuid, nullableString(stringPtrOrNil(portalID)), timestampMS, isFromMe, tapbackType, nowMS, nowMS)
+	return err
+}
+
 func joinPlaceholders(ps []string) string {
 	out := ""
 	for i, p := range ps {

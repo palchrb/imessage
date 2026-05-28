@@ -2326,7 +2326,7 @@ func (c *IMClient) OnMessage(msg rustpushgo.WrappedMessage) {
 			if known, _ := c.cloudStore.hasMessageUUID(context.Background(), msg.Uuid); known {
 				return
 			}
-			if err := c.cloudStore.persistMessageUUID(context.Background(), msg.Uuid, "", int64(msg.TimestampMs), false); err != nil {
+			if err := c.persistRealtimeMessageUUID(context.Background(), msg.Uuid, "", int64(msg.TimestampMs), false); err != nil {
 				log.Warn().Err(err).Str("uuid", msg.Uuid).Msg("Failed to persist NotifyAnyway UUID; duplicates possible on restart")
 			}
 		}
@@ -2745,7 +2745,7 @@ func (c *IMClient) handleMessage(log zerolog.Logger, msg rustpushgo.WrappedMessa
 	// hasMessageUUID checks cloud_message regardless of the deleted flag,
 	// so soft-deleted UUIDs from prior portal deletions still match.
 	if c.cloudStore != nil {
-		if err := c.cloudStore.persistMessageUUID(context.Background(), msg.Uuid, string(portalKey.ID), int64(msg.TimestampMs), sender.IsFromMe); err != nil {
+		if err := c.persistRealtimeMessageUUID(context.Background(), msg.Uuid, string(portalKey.ID), int64(msg.TimestampMs), sender.IsFromMe); err != nil {
 			log.Warn().Err(err).Str("uuid", msg.Uuid).Msg("Failed to persist message UUID; duplicates may occur on restart")
 		}
 	}
@@ -2878,7 +2878,7 @@ func (c *IMClient) handleTapback(log zerolog.Logger, msg rustpushgo.WrappedMessa
 				storedType += 1000 // removals: 3000-3006, matching TapbackRemoveOffset
 			}
 		}
-		if err := c.cloudStore.persistTapbackUUID(context.Background(), msg.Uuid, string(portalKey.ID), int64(msg.TimestampMs), sender.IsFromMe, storedType); err != nil {
+		if err := c.persistRealtimeTapbackUUID(context.Background(), msg.Uuid, string(portalKey.ID), int64(msg.TimestampMs), sender.IsFromMe, storedType); err != nil {
 			log.Warn().Err(err).Str("uuid", msg.Uuid).Msg("Failed to persist tapback UUID; duplicates may occur on restart")
 		}
 	}
@@ -5448,7 +5448,7 @@ func (c *IMClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matrix
 	// Persist UUID immediately so echo detection works even if the portal
 	// is deleted before the APNs echo arrives.
 	if c.cloudStore != nil {
-		if err := c.cloudStore.persistMessageUUID(ctx, uuid, string(msg.Portal.ID), time.Now().UnixMilli(), true); err != nil {
+		if err := c.persistRealtimeMessageUUID(ctx, uuid, string(msg.Portal.ID), time.Now().UnixMilli(), true); err != nil {
 			zerolog.Ctx(ctx).Warn().Err(err).Str("uuid", uuid).Msg("Failed to persist sent message UUID; echo may be delivered as duplicate")
 		}
 	}
@@ -5643,7 +5643,7 @@ func (c *IMClient) handleMatrixFile(ctx context.Context, msg *bridgev2.MatrixMes
 	// Persist UUID immediately so echo detection works even if the portal
 	// is deleted before the APNs echo arrives.
 	if c.cloudStore != nil {
-		if err := c.cloudStore.persistMessageUUID(ctx, uuid, string(msg.Portal.ID), time.Now().UnixMilli(), true); err != nil {
+		if err := c.persistRealtimeMessageUUID(ctx, uuid, string(msg.Portal.ID), time.Now().UnixMilli(), true); err != nil {
 			zerolog.Ctx(ctx).Warn().Err(err).Str("uuid", uuid).Msg("Failed to persist sent attachment UUID; echo may be delivered as duplicate")
 		}
 	}
@@ -5662,7 +5662,7 @@ func (c *IMClient) handleMatrixFile(ctx context.Context, msg *bridgev2.MatrixMes
 			textUUID = tUUID
 			siblingUUID = uuid
 			if c.cloudStore != nil {
-				if err := c.cloudStore.persistMessageUUID(ctx, tUUID, string(msg.Portal.ID), time.Now().UnixMilli(), true); err != nil {
+				if err := c.persistRealtimeMessageUUID(ctx, tUUID, string(msg.Portal.ID), time.Now().UnixMilli(), true); err != nil {
 					zerolog.Ctx(ctx).Warn().Err(err).Str("uuid", tUUID).Msg("Failed to persist sent text UUID; echo may be delivered as duplicate")
 				}
 			}

@@ -3496,6 +3496,43 @@ func (c *IMClient) createPortalsFromCloudSync(ctx context.Context, log zerolog.L
 	}
 }
 
+// persistRealtimeMessageUUID writes a realtime (APNs) message's identifier to
+// both cloud_message and bridge_message_meta. The cloud_message write is the
+// load-bearing one (existing readers depend on it); the bridge_message_meta
+// write is best-effort during the privacy-fork transition.
+func (c *IMClient) persistRealtimeMessageUUID(ctx context.Context, uuid, portalID string, timestampMS int64, isFromMe bool) error {
+	if c.cloudStore == nil {
+		return nil
+	}
+	if err := c.cloudStore.persistMessageUUID(ctx, uuid, portalID, timestampMS, isFromMe); err != nil {
+		return err
+	}
+	if c.bridgeMeta != nil {
+		if err := c.bridgeMeta.persistMessageUUID(ctx, uuid, portalID, timestampMS, isFromMe); err != nil {
+			c.Main.Bridge.Log.Warn().Err(err).Str("guid", uuid).
+				Msg("bridge_message_meta persist failed (continuing)")
+		}
+	}
+	return nil
+}
+
+// persistRealtimeTapbackUUID is persistRealtimeMessageUUID + tapback_type.
+func (c *IMClient) persistRealtimeTapbackUUID(ctx context.Context, uuid, portalID string, timestampMS int64, isFromMe bool, tapbackType uint32) error {
+	if c.cloudStore == nil {
+		return nil
+	}
+	if err := c.cloudStore.persistTapbackUUID(ctx, uuid, portalID, timestampMS, isFromMe, tapbackType); err != nil {
+		return err
+	}
+	if c.bridgeMeta != nil {
+		if err := c.bridgeMeta.persistTapbackUUID(ctx, uuid, portalID, timestampMS, isFromMe, tapbackType); err != nil {
+			c.Main.Bridge.Log.Warn().Err(err).Str("guid", uuid).
+				Msg("bridge_message_meta tapback persist failed (continuing)")
+		}
+	}
+	return nil
+}
+
 func (c *IMClient) ensureCloudSyncStore(ctx context.Context) error {
 	if c.cloudStore == nil {
 		return fmt.Errorf("cloud store not initialized")
