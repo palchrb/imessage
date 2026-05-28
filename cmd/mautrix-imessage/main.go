@@ -104,6 +104,16 @@ func main() {
 			m.Init()
 			fmt.Fprintln(os.Stderr, "Database initialized successfully")
 			os.Exit(0)
+		case "migrate":
+			// One-way migration from upstream/Jason's cleartext schema to
+			// this fork's identifier-only schema. Stub for now — flag and
+			// dispatch are wired up so install scripts and docs can already
+			// reference the final invocation. Actual conversion lands in a
+			// later PR (drops cloud_message + cloud_attachment_cache, fills
+			// bridge_message_meta + bridge_attachment_meta from topology).
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+			runMigrate(&m)
+			return
 		}
 	}
 

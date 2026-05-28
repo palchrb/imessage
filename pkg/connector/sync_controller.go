@@ -2274,6 +2274,62 @@ func safeCloudQueryAttachmentsFallback(client *rustpushgo.Client, knownRecordNam
 	})
 }
 
+// logCloudMessagePageOrdering emits a one-line diagnostic about how a single
+// CloudKit message page is ordered. We use this to decide whether time-window
+// flushing during initial sync is safe: if pages are consistently sorted by
+// timestamp (asc or desc) we can flush older portals while newer ones are
+// still streaming in. If they're unsorted we have to keep the full RAM graph
+// until every page is in.
+//
+// Cheap to compute (O(n) over one page) and only runs for non-empty pages.
+func logCloudMessagePageOrdering(log *zerolog.Logger, page int, msgs []rustpushgo.WrappedCloudSyncMessage) {
+	if len(msgs) == 0 {
+		return
+	}
+	minTS := msgs[0].TimestampMs
+	maxTS := msgs[0].TimestampMs
+	asc, desc := true, true
+	chatSet := make(map[string]struct{})
+	for i, m := range msgs {
+		if m.TimestampMs < minTS {
+			minTS = m.TimestampMs
+		}
+		if m.TimestampMs > maxTS {
+			maxTS = m.TimestampMs
+		}
+		if i > 0 {
+			if m.TimestampMs < msgs[i-1].TimestampMs {
+				asc = false
+			}
+			if m.TimestampMs > msgs[i-1].TimestampMs {
+				desc = false
+			}
+		}
+		if m.CloudChatId != "" {
+			chatSet[m.CloudChatId] = struct{}{}
+		}
+	}
+	order := "mixed"
+	switch {
+	case asc && desc:
+		order = "constant"
+	case asc:
+		order = "asc"
+	case desc:
+		order = "desc"
+	}
+	log.Info().
+		Str("component", "cloud_sync_ordering").
+		Int("page", page).
+		Int("messages", len(msgs)).
+		Int("unique_chats", len(chatSet)).
+		Int64("min_ts_ms", minTS).
+		Int64("max_ts_ms", maxTS).
+		Int64("span_ms", maxTS-minTS).
+		Str("order", order).
+		Msg("CloudKit message page ordering")
+}
+
 func (c *IMClient) syncCloudMessages(ctx context.Context, attMap map[string]cloudAttachmentRow) (cloudSyncCounters, *string, error) {
 	var counts cloudSyncCounters
 	token, err := c.cloudStore.getSyncState(ctx, cloudZoneMessages)
@@ -2321,6 +2377,8 @@ func (c *IMClient) syncCloudMessages(ctx context.Context, attMap map[string]clou
 			Bool("done", resp.Done).
 			Bool("has_token", resp.ContinuationToken != nil).
 			Msg("CloudKit message sync page")
+
+		logCloudMessagePageOrdering(&log, page, resp.Messages)
 
 		if err = c.ingestCloudMessages(ctx, resp.Messages, "", &counts, attMap); err != nil {
 			return counts, token, err
