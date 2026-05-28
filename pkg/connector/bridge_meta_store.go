@@ -32,8 +32,15 @@ func newBridgeMetaStore(db *dbutil.Database, loginID networkid.UserLoginID) *bri
 
 // bridgeMessageMetaRow is the in-memory shape of a bridge_message_meta row.
 // No content fields — text, subject, attachment blobs intentionally absent.
+//
+// RecordName is the opaque CloudKit record identifier. We persist it because
+// several legacy code paths (ghost-receipt suppression, restored-chat seeding)
+// distinguish CloudKit-imported messages from real-time-inserted stubs by
+// checking record_name <> ''. It's a pointer, not content — same privacy
+// posture as the GUID or the mxc:// URI.
 type bridgeMessageMetaRow struct {
 	GUID              string
+	RecordName        string
 	PortalID          string
 	ChatID            string
 	TimestampMS       int64
@@ -80,6 +87,7 @@ func (s *bridgeMetaStore) ensureSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS bridge_message_meta (
 			login_id            TEXT    NOT NULL,
 			guid                TEXT    NOT NULL,
+			record_name         TEXT    NOT NULL DEFAULT '',
 			portal_id           TEXT,
 			chat_id             TEXT,
 			timestamp_ms        BIGINT  NOT NULL,
@@ -136,6 +144,24 @@ func (s *bridgeMetaStore) ensureSchema(ctx context.Context) error {
 			return fmt.Errorf("bridge_meta_store: %w", err)
 		}
 	}
+	// Migrations: add missing columns to bridge_message_meta on already-
+	// initialised databases (SQLite has no IF NOT EXISTS on ALTER).
+	for _, col := range []struct{ name, def string }{
+		{"record_name", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var exists int
+		_ = s.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info('bridge_message_meta') WHERE name=$1`,
+			col.name,
+		).Scan(&exists)
+		if exists == 0 {
+			if _, err := s.db.Exec(ctx, fmt.Sprintf(
+				`ALTER TABLE bridge_message_meta ADD COLUMN %s %s`, col.name, col.def,
+			)); err != nil {
+				return fmt.Errorf("add %s to bridge_message_meta: %w", col.name, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -170,14 +196,15 @@ func (s *bridgeMetaStore) upsertMessage(ctx context.Context, row bridgeMessageMe
 
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO bridge_message_meta (
-			login_id, guid, portal_id, chat_id, timestamp_ms, sender, is_from_me,
+			login_id, guid, record_name, portal_id, chat_id, timestamp_ms, sender, is_from_me,
 			service, deleted, reply_target_guid, tapback_target_guid, tapback_emoji,
 			tapback_type, attachment_guids, retry_count, next_attempt_at,
 			last_error_kind, created_ts, updated_ts
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
 		)
 		ON CONFLICT (login_id, guid) DO UPDATE SET
+			record_name=CASE WHEN excluded.record_name <> '' THEN excluded.record_name ELSE bridge_message_meta.record_name END,
 			portal_id=excluded.portal_id,
 			chat_id=excluded.chat_id,
 			timestamp_ms=excluded.timestamp_ms,
@@ -195,7 +222,8 @@ func (s *bridgeMetaStore) upsertMessage(ctx context.Context, row bridgeMessageMe
 			last_error_kind=excluded.last_error_kind,
 			updated_ts=excluded.updated_ts
 	`,
-		s.loginID, row.GUID, nullableString(stringPtrOrNil(row.PortalID)),
+		s.loginID, row.GUID, row.RecordName,
+		nullableString(stringPtrOrNil(row.PortalID)),
 		nullableString(stringPtrOrNil(row.ChatID)), row.TimestampMS,
 		nullableString(stringPtrOrNil(row.Sender)), row.IsFromMe,
 		nullableString(stringPtrOrNil(row.Service)), row.Deleted,
@@ -289,12 +317,13 @@ func (s *bridgeMetaStore) upsertMessageBatch(ctx context.Context, rows []bridgeM
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO bridge_message_meta (
-			login_id, guid, portal_id, chat_id, timestamp_ms, sender, is_from_me,
+			login_id, guid, record_name, portal_id, chat_id, timestamp_ms, sender, is_from_me,
 			service, deleted, reply_target_guid, tapback_target_guid, tapback_emoji,
 			tapback_type, attachment_guids, retry_count, next_attempt_at,
 			last_error_kind, created_ts, updated_ts
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (login_id, guid) DO UPDATE SET
+			record_name=CASE WHEN excluded.record_name <> '' THEN excluded.record_name ELSE bridge_message_meta.record_name END,
 			portal_id=excluded.portal_id,
 			chat_id=excluded.chat_id,
 			timestamp_ms=excluded.timestamp_ms,
@@ -333,7 +362,7 @@ func (s *bridgeMetaStore) upsertMessageBatch(ctx context.Context, rows []bridgeM
 			nextAttemptAt = sql.NullInt64{Int64: row.NextAttemptAt, Valid: true}
 		}
 		if _, err = stmt.ExecContext(ctx,
-			s.loginID, row.GUID,
+			s.loginID, row.GUID, row.RecordName,
 			nullableString(stringPtrOrNil(row.PortalID)),
 			nullableString(stringPtrOrNil(row.ChatID)),
 			row.TimestampMS,
@@ -431,6 +460,21 @@ func (s *bridgeMetaStore) hasMessageUUID(ctx context.Context, uuid string) (bool
 		s.loginID, uuid,
 	).Scan(&count)
 	return count > 0, err
+}
+
+// isCloudBackfilledMessage reports whether a GUID was imported as a CloudKit
+// backfill (record_name populated) vs an APNs-only real-time stub
+// (record_name empty). Mirrors cloud_backfill_store.isCloudBackfilledMessage —
+// same UPPER() casing, same record_name <> '' semantics.
+func (s *bridgeMetaStore) isCloudBackfilledMessage(ctx context.Context, uuid string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM bridge_message_meta
+			WHERE login_id=$1 AND UPPER(guid)=UPPER($2) AND record_name <> ''
+		)
+	`, s.loginID, uuid).Scan(&exists)
+	return exists, err
 }
 
 // hasMessageBatch checks existence of many GUIDs in a single query, returning

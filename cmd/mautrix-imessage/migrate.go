@@ -174,6 +174,7 @@ func ensureBridgeMetaSchemaForMigrate(ctx context.Context, db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS bridge_message_meta (
 			login_id            TEXT    NOT NULL,
 			guid                TEXT    NOT NULL,
+			record_name         TEXT    NOT NULL DEFAULT '',
 			portal_id           TEXT,
 			chat_id             TEXT,
 			timestamp_ms        BIGINT  NOT NULL,
@@ -240,12 +241,12 @@ func ensureBridgeMetaSchemaForMigrate(ctx context.Context, db *sql.DB) error {
 func backfillBridgeMessageMeta(ctx context.Context, db *sql.DB) (int64, error) {
 	res, err := db.ExecContext(ctx, `
 		INSERT INTO bridge_message_meta (
-			login_id, guid, portal_id, chat_id, timestamp_ms, sender, is_from_me,
+			login_id, guid, record_name, portal_id, chat_id, timestamp_ms, sender, is_from_me,
 			service, deleted, tapback_target_guid, tapback_emoji, tapback_type,
 			retry_count, created_ts, updated_ts
 		)
 		SELECT
-			login_id, guid, portal_id, chat_id, timestamp_ms, sender, is_from_me,
+			login_id, guid, COALESCE(record_name, ''), portal_id, chat_id, timestamp_ms, sender, is_from_me,
 			service, deleted, tapback_target_guid, tapback_emoji, tapback_type,
 			0, created_ts, updated_ts
 		FROM cloud_message

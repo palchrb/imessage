@@ -3159,6 +3159,7 @@ func (c *IMClient) ingestCloudMessages(
 		// land without quote-resolution metadata at this layer.
 		bridgeBatch = append(bridgeBatch, bridgeMessageMetaRow{
 			GUID:              msg.Guid,
+			RecordName:        msg.RecordName,
 			PortalID:          portalID,
 			ChatID:            msg.CloudChatId,
 			TimestampMS:       timestampMS,
@@ -3627,6 +3628,22 @@ func (c *IMClient) hasMessageUUIDWithFallback(ctx context.Context, uuid string) 
 		return false, nil
 	}
 	return c.cloudStore.hasMessageUUID(ctx, uuid)
+}
+
+// isCloudBackfilledMessageWithFallback mirrors hasMessageUUIDWithFallback —
+// checks bridge_message_meta first, falls back to cloud_message on miss.
+// Used to suppress ghost read-receipts for messages that came in via the
+// backfill bundle rather than as live APNs deliveries.
+func (c *IMClient) isCloudBackfilledMessageWithFallback(ctx context.Context, uuid string) (bool, error) {
+	if c.bridgeMeta != nil {
+		if backfilled, err := c.bridgeMeta.isCloudBackfilledMessage(ctx, uuid); err == nil && backfilled {
+			return true, nil
+		}
+	}
+	if c.cloudStore == nil {
+		return false, nil
+	}
+	return c.cloudStore.isCloudBackfilledMessage(ctx, uuid)
 }
 
 // hasMessageBatchWithFallback mirrors hasMessageUUIDWithFallback for batch

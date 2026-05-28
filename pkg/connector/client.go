@@ -4903,6 +4903,7 @@ func (c *IMClient) fetchRecoveredMessagesFromCloudKit(ctx context.Context, log z
 		// and the reply_target_guid TODO.
 		bridgeRows = append(bridgeRows, bridgeMessageMetaRow{
 			GUID:              msg.Guid,
+			RecordName:        msg.RecordName,
 			PortalID:          portalID,
 			ChatID:            msg.CloudChatId,
 			TimestampMS:       timestampMS,
@@ -5087,7 +5088,7 @@ resolved:
 		// would incorrectly show "Seen by [person]" on outgoing messages.
 		// Real-time messages (not in cloud_message) are unaffected.
 		if c.cloudStore != nil {
-			if backfilled, err := c.cloudStore.isCloudBackfilledMessage(context.Background(), msg.Uuid); err == nil && backfilled {
+			if backfilled, err := c.isCloudBackfilledMessageWithFallback(context.Background(), msg.Uuid); err == nil && backfilled {
 				log.Debug().
 					Str("uuid", msg.Uuid).
 					Str("portal_id", string(portalKey.ID)).
