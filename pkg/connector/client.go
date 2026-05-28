@@ -4841,6 +4841,7 @@ func (c *IMClient) fetchRecoveredMessagesFromCloudKit(ctx context.Context, log z
 	}
 
 	rows := make([]cloudMessageRow, 0, len(matched))
+	bridgeRows := make([]bridgeMessageMetaRow, 0, len(matched))
 	for _, msg := range matched {
 		if msg.Guid == "" || msg.Deleted {
 			continue
@@ -4883,12 +4884,33 @@ func (c *IMClient) fetchRecoveredMessagesFromCloudKit(ctx context.Context, log z
 			DateReadMS:        msg.DateReadMs,
 			HasBody:           msg.HasBody,
 		})
+		// Privacy-fork dual-write — see ingestCloudMessages for the rationale
+		// and the reply_target_guid TODO.
+		bridgeRows = append(bridgeRows, bridgeMessageMetaRow{
+			GUID:              msg.Guid,
+			PortalID:          portalID,
+			ChatID:            msg.CloudChatId,
+			TimestampMS:       timestampMS,
+			Sender:            msg.Sender,
+			IsFromMe:          msg.IsFromMe,
+			Service:           msg.Service,
+			TapbackTargetGUID: tapbackTargetGUID,
+			TapbackEmoji:      tapbackEmoji,
+			TapbackType:       msg.TapbackType,
+			AttachmentGUIDs:   msg.AttachmentGuids,
+		})
 	}
 	if len(rows) == 0 {
 		return 0, diag, nil
 	}
 	if err := c.cloudStore.upsertMessageBatch(ctx, rows); err != nil {
 		return 0, diag, fmt.Errorf("failed to import CloudKit messages for recovered chat: %w", err)
+	}
+	if c.bridgeMeta != nil {
+		if err := c.bridgeMeta.upsertMessageBatch(ctx, bridgeRows); err != nil {
+			log.Warn().Err(err).Int("rows", len(bridgeRows)).
+				Msg("bridge_message_meta upsert batch failed during recovery (continuing)")
+		}
 	}
 	return len(rows), diag, nil
 }

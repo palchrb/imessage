@@ -2813,6 +2813,11 @@ func (c *IMClient) ingestCloudMessages(
 	if err := c.cloudStore.deleteMessageBatch(ctx, deletedGUIDs); err != nil {
 		return fmt.Errorf("failed to delete messages: %w", err)
 	}
+	if c.bridgeMeta != nil {
+		if err := c.bridgeMeta.markMessageDeletedBatch(ctx, deletedGUIDs); err != nil {
+			log.Warn().Err(err).Msg("bridge_message_meta tombstone batch failed (continuing)")
+		}
+	}
 
 	// Snapshot recentlyDeletedPortals so we can mark re-imported messages for
 	// deleted portals as deleted=TRUE. This closes the race where a periodic
@@ -2891,6 +2896,7 @@ func (c *IMClient) ingestCloudMessages(
 	}
 
 	batch := make([]cloudMessageRow, 0, len(liveMessages))
+	bridgeBatch := make([]bridgeMessageMetaRow, 0, len(liveMessages))
 	for _, msg := range liveMessages {
 		if msg.Guid == "" {
 			log.Warn().
@@ -3110,6 +3116,26 @@ func (c *IMClient) ingestCloudMessages(
 			DateReadMS:        msg.DateReadMs,
 			HasBody:           msg.HasBody,
 		})
+		// Privacy-fork: dual-write topology-only row to bridge_message_meta.
+		// No text, no subject, no attachment JSON — just GUIDs and pointers.
+		// reply_target_guid is intentionally absent: the CloudKit FFI
+		// (rustpushgo.WrappedCloudSyncMessage) does not surface it. Will be
+		// filled in by a future rustpush change; for now we accept replies
+		// land without quote-resolution metadata at this layer.
+		bridgeBatch = append(bridgeBatch, bridgeMessageMetaRow{
+			GUID:              msg.Guid,
+			PortalID:          portalID,
+			ChatID:            msg.CloudChatId,
+			TimestampMS:       timestampMS,
+			Sender:            msg.Sender,
+			IsFromMe:          msg.IsFromMe,
+			Service:           msg.Service,
+			Deleted:           isDeleted,
+			TapbackTargetGUID: tapbackTargetGUID,
+			TapbackEmoji:      tapbackEmoji,
+			TapbackType:       msg.TapbackType,
+			AttachmentGUIDs:   msg.AttachmentGuids,
+		})
 
 		if existingSet[msg.Guid] {
 			counts.Updated++
@@ -3121,6 +3147,16 @@ func (c *IMClient) ingestCloudMessages(
 	// Phase 2: Batch insert all live rows in a single transaction.
 	if err := c.cloudStore.upsertMessageBatch(ctx, batch); err != nil {
 		return err
+	}
+	if c.bridgeMeta != nil {
+		if err := c.bridgeMeta.upsertMessageBatch(ctx, bridgeBatch); err != nil {
+			// Privacy-fork dual-write is best-effort during transition. A
+			// failure here means bridge_message_meta is behind cloud_message
+			// for this batch — next sync's upsert will catch it up. We log
+			// but do not fail the ingest, so existing behavior is preserved.
+			log.Warn().Err(err).Int("rows", len(bridgeBatch)).
+				Msg("bridge_message_meta upsert batch failed (continuing)")
+		}
 	}
 
 	return nil

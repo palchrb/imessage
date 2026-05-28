@@ -274,6 +274,133 @@ func (s *bridgeMetaStore) markMessageDeleted(ctx context.Context, guid string) e
 	return err
 }
 
+// upsertMessageBatch writes many rows in a single transaction. Mirrors
+// cloudBackfillStore.upsertMessageBatch — same prepared-statement pattern, same
+// conflict resolution, just identifier-only columns.
+func (s *bridgeMetaStore) upsertMessageBatch(ctx context.Context, rows []bridgeMessageMetaRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.RawDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO bridge_message_meta (
+			login_id, guid, portal_id, chat_id, timestamp_ms, sender, is_from_me,
+			service, deleted, reply_target_guid, tapback_target_guid, tapback_emoji,
+			tapback_type, attachment_guids, retry_count, next_attempt_at,
+			last_error_kind, created_ts, updated_ts
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (login_id, guid) DO UPDATE SET
+			portal_id=excluded.portal_id,
+			chat_id=excluded.chat_id,
+			timestamp_ms=excluded.timestamp_ms,
+			sender=excluded.sender,
+			is_from_me=excluded.is_from_me,
+			service=excluded.service,
+			deleted=CASE WHEN bridge_message_meta.deleted THEN bridge_message_meta.deleted ELSE excluded.deleted END,
+			reply_target_guid=excluded.reply_target_guid,
+			tapback_target_guid=excluded.tapback_target_guid,
+			tapback_emoji=excluded.tapback_emoji,
+			tapback_type=excluded.tapback_type,
+			attachment_guids=excluded.attachment_guids,
+			updated_ts=excluded.updated_ts
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare batch: %w", err)
+	}
+	defer stmt.Close()
+
+	nowMS := time.Now().UnixMilli()
+	for _, row := range rows {
+		var attachmentGUIDsJSON sql.NullString
+		if len(row.AttachmentGUIDs) > 0 {
+			buf, marshalErr := json.Marshal(row.AttachmentGUIDs)
+			if marshalErr != nil {
+				return fmt.Errorf("marshal attachment_guids for %s: %w", row.GUID, marshalErr)
+			}
+			attachmentGUIDsJSON = sql.NullString{String: string(buf), Valid: true}
+		}
+		var tapbackType sql.NullInt32
+		if row.TapbackType != nil {
+			tapbackType = sql.NullInt32{Int32: int32(*row.TapbackType), Valid: true}
+		}
+		var nextAttemptAt sql.NullInt64
+		if row.NextAttemptAt > 0 {
+			nextAttemptAt = sql.NullInt64{Int64: row.NextAttemptAt, Valid: true}
+		}
+		if _, err = stmt.ExecContext(ctx,
+			s.loginID, row.GUID,
+			nullableString(stringPtrOrNil(row.PortalID)),
+			nullableString(stringPtrOrNil(row.ChatID)),
+			row.TimestampMS,
+			nullableString(stringPtrOrNil(row.Sender)),
+			row.IsFromMe,
+			nullableString(stringPtrOrNil(row.Service)),
+			row.Deleted,
+			nullableString(stringPtrOrNil(row.ReplyTargetGUID)),
+			nullableString(stringPtrOrNil(row.TapbackTargetGUID)),
+			nullableString(stringPtrOrNil(row.TapbackEmoji)),
+			tapbackType, attachmentGUIDsJSON,
+			row.RetryCount, nextAttemptAt,
+			nullableString(stringPtrOrNil(row.LastErrorKind)),
+			nowMS, nowMS,
+		); err != nil {
+			return fmt.Errorf("insert %s: %w", row.GUID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// markMessageDeletedBatch sets deleted=TRUE for many GUIDs in a single
+// statement. Mirrors cloudBackfillStore.deleteMessageBatch — soft-delete so a
+// future re-sync can't resurrect tombstoned rows.
+func (s *bridgeMetaStore) markMessageDeletedBatch(ctx context.Context, guids []string) error {
+	if len(guids) == 0 {
+		return nil
+	}
+	nowMS := time.Now().UnixMilli()
+	const chunkSize = 500
+	for i := 0; i < len(guids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(guids) {
+			end = len(guids)
+		}
+		chunk := guids[i:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, s.loginID, nowMS)
+		for j, guid := range chunk {
+			placeholders[j] = fmt.Sprintf("$%d", j+3)
+			args = append(args, guid)
+		}
+		query := fmt.Sprintf(
+			`UPDATE bridge_message_meta SET deleted=TRUE, updated_ts=$2
+			 WHERE login_id=$1 AND guid IN (%s)`,
+			joinPlaceholders(placeholders),
+		)
+		if _, err := s.db.Exec(ctx, query, args...); err != nil {
+			return fmt.Errorf("markMessageDeletedBatch: %w", err)
+		}
+	}
+	return nil
+}
+
+func joinPlaceholders(ps []string) string {
+	out := ""
+	for i, p := range ps {
+		if i > 0 {
+			out += ","
+		}
+		out += p
+	}
+	return out
+}
+
 // upsertAttachment writes (or updates) a single bridge_attachment_meta row.
 // The mxc_uri may be empty on insert (pre-upload) and filled in by a later
 // update once the Matrix media upload completes — this is the resumability
