@@ -1720,10 +1720,17 @@ func (s *cloudBackfillStore) normalizeGroupMessagePortalIDs(ctx context.Context)
 // getMessageRecordNamesByGroupID returns all non-empty message record_names
 // for portals that share the given group_id.
 func (s *cloudBackfillStore) getMessageRecordNamesByGroupID(ctx context.Context, groupID string) ([]string, error) {
+	// Privacy-fork dual-read: UNION cloud_message and bridge_message_meta so
+	// migrate-in-progress databases see record_names from either source.
+	// cloud_chat is the join authority for group_id resolution and stays put.
 	rows, err := s.db.Query(ctx, `
 		SELECT cm.record_name FROM cloud_message cm
 		INNER JOIN cloud_chat cc ON cc.login_id=cm.login_id AND cc.portal_id=cm.portal_id
 		WHERE cm.login_id=$1 AND LOWER(cc.group_id)=LOWER($2) AND cm.record_name <> ''
+		UNION
+		SELECT bm.record_name FROM bridge_message_meta bm
+		INNER JOIN cloud_chat cc ON cc.login_id=bm.login_id AND cc.portal_id=bm.portal_id
+		WHERE bm.login_id=$1 AND LOWER(cc.group_id)=LOWER($2) AND bm.record_name <> ''
 	`, s.loginID, groupID)
 	if err != nil {
 		return nil, err
@@ -2482,8 +2489,19 @@ type portalWithNewestMessage struct {
 func (s *cloudBackfillStore) listPortalIDsWithNewestTimestamp(ctx context.Context) ([]portalWithNewestMessage, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT sub.portal_id, MAX(sub.newest_ts) AS newest_ts, SUM(sub.msg_count) AS msg_count FROM (
+			-- Privacy-fork: UNION ALL between cloud_message and bridge_message_meta
+			-- aggregations means active rows in either table contribute to
+			-- the portal's newest_ts. SUM in the outer SELECT collapses
+			-- duplicate per-portal aggregations from both tables.
 			SELECT portal_id, MAX(timestamp_ms) AS newest_ts, COUNT(*) AS msg_count
 			FROM cloud_message
+			WHERE login_id=$1 AND portal_id IS NOT NULL AND portal_id <> '' AND deleted=FALSE AND record_name <> ''
+			GROUP BY portal_id
+
+			UNION ALL
+
+			SELECT portal_id, MAX(timestamp_ms) AS newest_ts, COUNT(*) AS msg_count
+			FROM bridge_message_meta
 			WHERE login_id=$1 AND portal_id IS NOT NULL AND portal_id <> '' AND deleted=FALSE AND record_name <> ''
 			GROUP BY portal_id
 
@@ -2497,6 +2515,10 @@ func (s *cloudBackfillStore) listPortalIDsWithNewestTimestamp(ctx context.Contex
 			AND cc.portal_id NOT IN (
 				SELECT DISTINCT cm.portal_id FROM cloud_message cm
 				WHERE cm.login_id=$1 AND cm.portal_id IS NOT NULL AND cm.portal_id <> '' AND cm.deleted=FALSE
+			)
+			AND cc.portal_id NOT IN (
+				SELECT DISTINCT bm.portal_id FROM bridge_message_meta bm
+				WHERE bm.login_id=$1 AND bm.portal_id IS NOT NULL AND bm.portal_id <> '' AND bm.deleted=FALSE
 			)
 		) sub
 		WHERE NOT EXISTS (
@@ -2854,6 +2876,17 @@ func (s *cloudBackfillStore) undeleteCloudMessagesByPortalID(ctx context.Context
 		return 0, err
 	}
 	n, _ := result.RowsAffected()
+
+	// Privacy-fork mirror: same undelete on bridge_message_meta. Counts are
+	// returned from cloud_message for backward-compat with the existing
+	// callers; bridge_message_meta runs in lockstep but is not double-counted.
+	if _, err := s.db.Exec(ctx,
+		`UPDATE bridge_message_meta SET deleted=FALSE, updated_ts=$3
+		 WHERE login_id=$1 AND portal_id=$2 AND deleted=TRUE`,
+		s.loginID, portalID, nowMS,
+	); err != nil {
+		return int(n), fmt.Errorf("undelete bridge_message_meta for portal %s: %w", portalID, err)
+	}
 	return int(n), nil
 }
 
