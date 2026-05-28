@@ -44,8 +44,13 @@ type portalSessionState struct {
 }
 
 // sessionMessage holds the fields needed to render a single CloudKit message
-// to Matrix without consulting cloud_message. Text and Subject live here in
-// RAM only — they never get persisted by anything that touches this struct.
+// to Matrix without consulting cloud_message. Text, Subject and the rich
+// attachment-JSON live here in RAM only — they never get persisted by
+// anything that touches this struct.
+//
+// AttachmentsJSON mirrors cloudMessageRow.AttachmentsJSON exactly (a
+// serialised []cloudAttachmentRow) so downstream conversion code can stay
+// schema-stable across the cloud_message-vs-session source switch.
 type sessionMessage struct {
 	GUID              string
 	RecordName        string
@@ -62,7 +67,80 @@ type sessionMessage struct {
 	TapbackTargetGUID string
 	TapbackEmoji      string
 	AttachmentGUIDs   []string
+	AttachmentsJSON   string // RAM-only — full []cloudAttachmentRow JSON
 	DateReadMS        int64
+}
+
+// toCloudMessageRow shapes a sessionMessage into the cloudMessageRow the
+// existing render path expects. Lets FetchMessages plug session data into
+// cloudRowsToBackfillMessages with no downstream changes.
+func (m sessionMessage) toCloudMessageRow() cloudMessageRow {
+	return cloudMessageRow{
+		GUID:              m.GUID,
+		RecordName:        m.RecordName,
+		CloudChatID:       m.ChatID,
+		PortalID:          m.PortalID,
+		TimestampMS:       m.TimestampMS,
+		Sender:            m.Sender,
+		IsFromMe:          m.IsFromMe,
+		Text:              m.Text,
+		Subject:           m.Subject,
+		Service:           m.Service,
+		Deleted:           false, // session never holds tombstones
+		TapbackType:       m.TapbackType,
+		TapbackTargetGUID: m.TapbackTargetGUID,
+		TapbackEmoji:      m.TapbackEmoji,
+		AttachmentsJSON:   m.AttachmentsJSON,
+		DateReadMS:        m.DateReadMS,
+		HasBody:           m.HasBody,
+	}
+}
+
+// GetSortedMessages returns the session's messages for a portal in
+// chronological (ascending timestamp) order. Returns nil if the portal has
+// no session data — callers use that as the signal to fall back to
+// cloud_message.
+func (s *cloudSyncSession) GetSortedMessages(portalID string) []sessionMessage {
+	if s == nil || portalID == "" {
+		return nil
+	}
+	s.mu.RLock()
+	state, ok := s.portals[portalID]
+	if !ok {
+		s.mu.RUnlock()
+		return nil
+	}
+	// Copy under the read lock so the caller can iterate without holding it.
+	out := make([]sessionMessage, len(state.Messages))
+	copy(out, state.Messages)
+	s.mu.RUnlock()
+	sortSessionMessagesByTS(out)
+	return out
+}
+
+// HasPortal reports whether the session has any data for a portal — cheaper
+// than GetSortedMessages when the caller just needs to decide which read path
+// to take.
+func (s *cloudSyncSession) HasPortal(portalID string) bool {
+	if s == nil || portalID == "" {
+		return false
+	}
+	s.mu.RLock()
+	state, ok := s.portals[portalID]
+	s.mu.RUnlock()
+	return ok && len(state.Messages) > 0
+}
+
+func sortSessionMessagesByTS(msgs []sessionMessage) {
+	// Insertion sort: pages arrive nearly-sorted, so this is O(n) on the
+	// common path and avoids importing sort just for one call site.
+	for i := 1; i < len(msgs); i++ {
+		j := i
+		for j > 0 && msgs[j-1].TimestampMS > msgs[j].TimestampMS {
+			msgs[j-1], msgs[j] = msgs[j], msgs[j-1]
+			j--
+		}
+	}
 }
 
 func newCloudSyncSession() *cloudSyncSession {

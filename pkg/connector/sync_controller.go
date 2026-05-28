@@ -1913,18 +1913,18 @@ func (c *IMClient) runCloudKitBackfill(ctx context.Context, log zerolog.Logger) 
 	backfillStart := time.Now()
 
 	// Privacy-fork: spin up a fresh RAM-staging session for this sync run.
-	// ingestCloudMessages populates it alongside cloud_message; readers
-	// (FetchMessages) wire up in a follow-up commit. The session is dropped
-	// at function exit for now — once readers go live, the drop moves to
-	// AllFlushed() after the flush phase.
+	// ingestCloudMessages populates it alongside cloud_message, and the
+	// forward backfill path in FetchMessages now reads from it when the
+	// portal has session data.
+	//
+	// We deliberately do NOT drop the session when runCloudKitBackfill
+	// returns: bridgev2 schedules forward-backfill tasks after the sync
+	// completes, and FetchMessages needs the session to still be there.
+	// The next sync run replaces it (overwriting cloudSession). A bridge
+	// restart drops it (RAM-only) and re-syncs from CloudKit per the brief.
 	c.cloudSessionLock.Lock()
 	c.cloudSession = newCloudSyncSession()
 	c.cloudSessionLock.Unlock()
-	defer func() {
-		c.cloudSessionLock.Lock()
-		c.cloudSession = nil
-		c.cloudSessionLock.Unlock()
-	}()
 
 	// Always restart attachment sync from scratch. The attachment map
 	// (attMap) is built in-memory during sync and used to enrich messages.
@@ -3175,6 +3175,7 @@ func (c *IMClient) ingestCloudMessages(
 				TapbackTargetGUID: tapbackTargetGUID,
 				TapbackEmoji:      tapbackEmoji,
 				AttachmentGUIDs:   msg.AttachmentGuids,
+				AttachmentsJSON:   attachmentsJSON,
 				DateReadMS:        msg.DateReadMs,
 			})
 		}
@@ -3573,6 +3574,38 @@ func (c *IMClient) persistRealtimeTapbackUUID(ctx context.Context, uuid, portalI
 		}
 	}
 	return nil
+}
+
+// fetchLatestFromSession returns the latest N session messages for a portal
+// shaped as cloudMessageRow so the existing forward-backfill render path can
+// consume them. Returns nil when the session is absent or has no data for
+// this portal — callers fall back to cloud_message in that case.
+//
+// "Latest" here means highest-timestamp first up to count, then re-sorted
+// chronologically (ASC) so the returned slice matches the post-reverse layout
+// the cloud_message path produces.
+func (c *IMClient) fetchLatestFromSession(portalID string, count int) []cloudMessageRow {
+	c.cloudSessionLock.RLock()
+	session := c.cloudSession
+	c.cloudSessionLock.RUnlock()
+	if session == nil || !session.HasPortal(portalID) {
+		return nil
+	}
+	msgs := session.GetSortedMessages(portalID) // ASC by ts
+	if len(msgs) == 0 {
+		return nil
+	}
+	// Take the last `count` entries (the newest ones) and convert.
+	start := 0
+	if count > 0 && len(msgs) > count {
+		start = len(msgs) - count
+	}
+	tail := msgs[start:]
+	out := make([]cloudMessageRow, len(tail))
+	for i, m := range tail {
+		out[i] = m.toCloudMessageRow()
+	}
+	return out
 }
 
 // persistBridgeAttachmentMeta extracts identifier-only metadata from a Matrix
