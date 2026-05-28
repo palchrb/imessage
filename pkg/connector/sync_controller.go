@@ -2858,7 +2858,7 @@ func (c *IMClient) ingestCloudMessages(
 			guids = append(guids, msg.Guid)
 		}
 	}
-	existingSet, err := c.cloudStore.hasMessageBatch(ctx, guids)
+	existingSet, err := c.hasMessageBatchWithFallback(ctx, guids)
 	if err != nil {
 		return fmt.Errorf("batch existence check failed: %w", err)
 	}
@@ -3611,6 +3611,52 @@ func (c *IMClient) persistRealtimeTapbackUUID(ctx context.Context, uuid, portalI
 // Conversion goes through cloudRowsToBackfillMessages so the existing
 // reply/tapback resolution, attachment-rendering and system-message
 // filtering all keep working without duplication.
+// hasMessageUUIDWithFallback checks bridge_message_meta first and falls back
+// to cloud_message on miss. The privacy fork wants reads to come from the
+// new table, but pre-fork rows only exist in cloud_message until migrate
+// has copied them over. The fallback closes that window — once the user
+// has run `mautrix-imessage migrate --to-privacy-fork --apply`,
+// bridge_message_meta is a superset and the fallback never fires.
+func (c *IMClient) hasMessageUUIDWithFallback(ctx context.Context, uuid string) (bool, error) {
+	if c.bridgeMeta != nil {
+		if known, err := c.bridgeMeta.hasMessageUUID(ctx, uuid); err == nil && known {
+			return true, nil
+		}
+	}
+	if c.cloudStore == nil {
+		return false, nil
+	}
+	return c.cloudStore.hasMessageUUID(ctx, uuid)
+}
+
+// hasMessageBatchWithFallback mirrors hasMessageUUIDWithFallback for batch
+// lookups. Returns the union of GUIDs known to either table.
+func (c *IMClient) hasMessageBatchWithFallback(ctx context.Context, guids []string) (map[string]bool, error) {
+	if len(guids) == 0 {
+		return nil, nil
+	}
+	existing := make(map[string]bool, len(guids))
+	if c.bridgeMeta != nil {
+		bm, err := c.bridgeMeta.hasMessageBatch(ctx, guids)
+		if err != nil {
+			return nil, err
+		}
+		for g := range bm {
+			existing[g] = true
+		}
+	}
+	if c.cloudStore != nil {
+		cm, err := c.cloudStore.hasMessageBatch(ctx, guids)
+		if err != nil {
+			return nil, err
+		}
+		for g := range cm {
+			existing[g] = true
+		}
+	}
+	return existing, nil
+}
+
 func (c *IMClient) flushCloudSessionToMatrix(ctx context.Context, log zerolog.Logger) {
 	c.cloudSessionLock.Lock()
 	session := c.cloudSession

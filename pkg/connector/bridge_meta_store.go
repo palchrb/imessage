@@ -416,6 +416,71 @@ func (s *bridgeMetaStore) persistTapbackUUID(ctx context.Context, uuid, portalID
 	return err
 }
 
+// hasMessageUUID reports whether a GUID is known to bridge_message_meta for
+// this login. Used for real-time echo detection: an APNs delivery whose UUID
+// is already on disk is an echo of a previously-seen message and should not
+// create a new portal or duplicate event.
+//
+// UPPER() on both sides: CloudKit GUIDs are lowercase, APNs UUIDs are
+// uppercase, and incoming SMS constant_uuid values vary in case. A
+// case-sensitive match would miss cross-path duplicates.
+func (s *bridgeMetaStore) hasMessageUUID(ctx context.Context, uuid string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM bridge_message_meta WHERE login_id=$1 AND UPPER(guid)=UPPER($2) LIMIT 1`,
+		s.loginID, uuid,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// hasMessageBatch checks existence of many GUIDs in a single query, returning
+// the set that already exist. Used by ingestCloudMessages to distinguish
+// "new" from "update" rows in the same way the cloud_backfill_store helper
+// did for cloud_message.
+func (s *bridgeMetaStore) hasMessageBatch(ctx context.Context, guids []string) (map[string]bool, error) {
+	if len(guids) == 0 {
+		return nil, nil
+	}
+	existing := make(map[string]bool, len(guids))
+	const chunkSize = 500
+	for i := 0; i < len(guids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(guids) {
+			end = len(guids)
+		}
+		chunk := guids[i:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, s.loginID)
+		for j, g := range chunk {
+			placeholders[j] = fmt.Sprintf("$%d", j+2)
+			args = append(args, g)
+		}
+		query := fmt.Sprintf(
+			`SELECT guid FROM bridge_message_meta WHERE login_id=$1 AND guid IN (%s)`,
+			joinPlaceholders(placeholders),
+		)
+		rows, err := s.db.Query(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var guid string
+			if err := rows.Scan(&guid); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			existing[guid] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return existing, nil
+}
+
 func joinPlaceholders(ps []string) string {
 	out := ""
 	for i, p := range ps {

@@ -2329,7 +2329,7 @@ func (c *IMClient) OnMessage(msg rustpushgo.WrappedMessage) {
 	// Post a silent bot notice in the relevant room so the user can see it.
 	if msg.IsNotifyAnyways {
 		if c.cloudStore != nil {
-			if known, _ := c.cloudStore.hasMessageUUID(context.Background(), msg.Uuid); known {
+			if known, _ := c.hasMessageUUIDWithFallback(context.Background(), msg.Uuid); known {
 				return
 			}
 			if err := c.persistRealtimeMessageUUID(context.Background(), msg.Uuid, "", int64(msg.TimestampMs), false); err != nil {
@@ -2693,7 +2693,7 @@ func (c *IMClient) handleMessage(log zerolog.Logger, msg rustpushgo.WrappedMessa
 	}
 
 	if c.cloudStore != nil {
-		if known, _ := c.cloudStore.hasMessageUUID(backgroundCtx, msg.Uuid); known {
+		if known, _ := c.hasMessageUUIDWithFallback(backgroundCtx, msg.Uuid); known {
 			if isDeletedPortal {
 				// Portal mid-deletion with a known UUID — stale echo.
 				log.Info().
@@ -2853,7 +2853,7 @@ func (c *IMClient) handleTapback(log zerolog.Logger, msg rustpushgo.WrappedMessa
 	// to prevent duplicate reactions and notifications from stale APNs re-delivery.
 	// Uses the same cloud_message UUID table as handleMessage (primary key lookup).
 	if msg.Uuid != "" && c.cloudStore != nil {
-		if known, _ := c.cloudStore.hasMessageUUID(context.Background(), msg.Uuid); known {
+		if known, _ := c.hasMessageUUIDWithFallback(context.Background(), msg.Uuid); known {
 			log.Debug().Str("uuid", msg.Uuid).Bool("is_stored", msg.IsStoredMessage).Msg("Skipping tapback already in message store")
 			return
 		}
