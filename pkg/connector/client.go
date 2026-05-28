@@ -6821,33 +6821,19 @@ func (c *IMClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessa
 		remaining := count
 
 		if !hasCursor {
-			// No anchor: fetch the N most recent messages. Try the privacy-
-			// fork RAM session first — if the latest sync populated it for
-			// this portal, we read text from RAM instead of cloud_message
-			// (which means a future --drop-legacy doesn't break backfill
-			// for portals that were synced after the last bridge restart).
-			//
-			// Falls back to listLatestMessages on miss: brand-new bridge
-			// restart with no sync yet, or portals whose messages were not
-			// re-emitted by the latest CloudKit page (e.g., quiet portals
-			// during an incremental sync).
+			// No anchor: fetch the N most recent messages. listLatestMessages
+			// selects the newest N (crash resilience — if interrupted, the
+			// delivered messages are recent, not ancient). We reverse to
+			// chronological (ASC) order before sending so the Matrix timeline
+			// displays correctly.
 			queryStart := time.Now()
-			var rows []cloudMessageRow
-			var sourceTag string
-			if sessionRows := c.fetchLatestFromSession(portalID, count); sessionRows != nil {
-				rows = sessionRows
-				sourceTag = "ram_session"
-			} else {
-				dbRows, queryErr := c.cloudStore.listLatestMessages(ctx, portalID, count)
-				if queryErr != nil {
-					log.Err(queryErr).Str("portal_id", portalID).Msg("Forward backfill: listLatestMessages FAILED")
-					return nil, queryErr
-				}
-				for i, j := 0, len(dbRows)-1; i < j; i, j = i+1, j-1 {
-					dbRows[i], dbRows[j] = dbRows[j], dbRows[i]
-				}
-				rows = dbRows
-				sourceTag = "cloud_message"
+			rows, queryErr := c.cloudStore.listLatestMessages(ctx, portalID, count)
+			if queryErr != nil {
+				log.Err(queryErr).Str("portal_id", portalID).Msg("Forward backfill: listLatestMessages FAILED")
+				return nil, queryErr
+			}
+			for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+				rows[i], rows[j] = rows[j], rows[i]
 			}
 			c.preUploadChunkAttachments(ctx, rows, *log)
 			allRows = rows
@@ -6855,7 +6841,6 @@ func (c *IMClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessa
 			chunk = 1
 			log.Debug().
 				Str("portal_id", portalID).
-				Str("source", sourceTag).
 				Int("rows", totalRows).
 				Dur("query_ms", time.Since(queryStart)).
 				Msg("Forward backfill: fetched most recent messages")
